@@ -43,7 +43,7 @@
 --   * Outside-click / Escape closing, with exclusive (one-at-a-time) dropdown behavior
 --   * Optional trigger text synchronization (UpdateTriggerText / RenderTrigger)
 --   * Overlay rendering under the trigger's ScreenGui to avoid ClipsDescendants clipping
---   * Lightweight open/close scale animation
+--   * Instant open/close visibility with simple entry hover/press feedback
 --   * Signals: Opened, Closed, Selected, SelectionChanged
 --   * Complete per-controller cleanup via Destroy()
 --
@@ -141,10 +141,11 @@ local DEFAULTS = {
 
 	UpdateTriggerText = false,
 
-	Animation = {
+	Interaction = {
 		Enabled = true,
-		Duration = 0.12,
-		ClosedScale = 0.96,
+		Duration = 0.08,
+		HoverBrightness = 0.08,
+		PressedBrightness = 0.12,
 		EasingStyle = Enum.EasingStyle.Quad,
 		EasingDirection = Enum.EasingDirection.Out,
 	},
@@ -339,13 +340,10 @@ function Dropdown.new(trigger, config)
 	self._optionById = {}
 	self._selectedId = nil
 	self._selectedIds = {}
-	self._transitionId = 0
 	self._generatedDropdown = false
 	self._generatedOverlay = false
 	self._generatedEntryTemplate = false
-	self._generatedScale = false
 	self._originalDropdownVisible = nil
-	self._originalScale = nil
 
 	self:_createUI()
 	self:_connectCore()
@@ -416,11 +414,6 @@ function Dropdown:_createGeneratedDropdown(parent)
 	stroke.Thickness = 1
 	stroke.Parent = container
 
-	local scale = Instance.new("UIScale")
-	scale.Name = "DropdownScale"
-	scale.Scale = 1
-	scale.Parent = container
-
 	local scroll = Instance.new("ScrollingFrame")
 	scroll.Name = "Entries"
 	scroll.BackgroundTransparency = 1
@@ -452,7 +445,6 @@ function Dropdown:_createGeneratedDropdown(parent)
 	self._dropdown = container
 	self._entryContainer = scroll
 	self._layout = layout
-	self._scale = scale
 end
 
 function Dropdown:_resolveEntryContainer(dropdown)
@@ -502,18 +494,6 @@ function Dropdown:_createUI()
 		end
 
 		self._entryContainer = self:_resolveEntryContainer(self._dropdown)
-		self._scale = self._dropdown:FindFirstChildOfClass("UIScale")
-		if self._scale then
-			self._originalScale = self._scale.Scale
-		end
-
-		if not self._scale and self.Config.Animation.Enabled then
-			local scale = Instance.new("UIScale")
-			scale.Name = "DropdownScale"
-			scale.Parent = self._dropdown
-			self._scale = scale
-			self._generatedScale = true
-		end
 		return
 	end
 
@@ -526,15 +506,6 @@ function Dropdown:_createUI()
 		self._dropdown.Parent = parent
 		self._dropdown.Visible = false
 		self._entryContainer = self:_resolveEntryContainer(self._dropdown)
-		self._scale = self._dropdown:FindFirstChildOfClass("UIScale")
-
-		if not self._scale and self.Config.Animation.Enabled then
-			local scale = Instance.new("UIScale")
-			scale.Name = "DropdownScale"
-			scale.Parent = self._dropdown
-			self._scale = scale
-			self._generatedScale = true
-		end
 		return
 	end
 
@@ -695,38 +666,104 @@ function Dropdown:_isSelected(id)
 	return false
 end
 
+function Dropdown:_updateEntryInteraction(entryData, immediate)
+	local button = entryData.Button
+	local restingColor = entryData.RestingBackgroundColor3
+
+	if not button or not button.Parent or not restingColor then
+		return
+	end
+
+	if entryData.InteractionTween then
+		local previousTween = entryData.InteractionTween
+		entryData.InteractionTween = nil
+		previousTween:Cancel()
+		previousTween:Destroy()
+	end
+
+	local targetColor = restingColor
+	local interaction = self.Config.Interaction
+	if interaction.Enabled and not entryData.Option.Disabled then
+		if entryData.Pressed then
+			targetColor = restingColor:Lerp(Color3.new(0, 0, 0), interaction.PressedBrightness)
+		elseif entryData.Hovered then
+			targetColor = restingColor:Lerp(Color3.new(1, 1, 1), interaction.HoverBrightness)
+		end
+	end
+
+	if immediate or interaction.Duration <= 0 then
+		button.BackgroundColor3 = targetColor
+		return
+	end
+
+	local tween = TweenService:Create(
+		button,
+		TweenInfo.new(interaction.Duration, interaction.EasingStyle, interaction.EasingDirection),
+		{ BackgroundColor3 = targetColor }
+	)
+	entryData.InteractionTween = tween
+	tween.Completed:Connect(function()
+		if entryData.InteractionTween ~= tween then
+			return
+		end
+		entryData.InteractionTween = nil
+		tween:Destroy()
+	end)
+	tween:Play()
+end
+
+function Dropdown:_setEntryInteraction(entryData, hovered, pressed)
+	if entryData.Option.Disabled then
+		return
+	end
+
+	entryData.Hovered = hovered
+	entryData.Pressed = pressed
+	self:_updateEntryInteraction(entryData, false)
+end
+
 function Dropdown:_renderEntry(entryData)
 	local option = entryData.Option
 	local entry = entryData.Instance
+	local button = entryData.Button
 	local state = {
 		Selected = self:_isSelected(option.Id),
 		Disabled = option.Disabled == true,
 		Index = entryData.Index,
 	}
 
+	-- Restore the resting color before a renderer computes the entry's next state.
+	if button and entryData.RestingBackgroundColor3 then
+		button.BackgroundColor3 = entryData.RestingBackgroundColor3
+	end
+
 	if self.Config.RenderOption then
 		self.Config.RenderOption(entry, option, state, self)
-		return
-	end
-
-	local label = self:_getEntryLabel(entry, option)
-	if label and (label:IsA("TextLabel") or label:IsA("TextButton")) then
-		label.Text = tostring(option.Text)
-	end
-
-	if self._generatedDropdown and entry:IsA("TextButton") then
-		applyProperties(entry, self.Config.Style.Entry)
-
-		if state.Selected then
-			applyProperties(entry, self.Config.Style.EntrySelected)
+	else
+		local label = self:_getEntryLabel(entry, option)
+		if label and (label:IsA("TextLabel") or label:IsA("TextButton")) then
+			label.Text = tostring(option.Text)
 		end
 
-		if state.Disabled then
-			applyProperties(entry, self.Config.Style.EntryDisabled)
+		if self._generatedDropdown and entry:IsA("TextButton") then
+			applyProperties(entry, self.Config.Style.Entry)
+
+			if state.Selected then
+				applyProperties(entry, self.Config.Style.EntrySelected)
+			end
+
+			if state.Disabled then
+				applyProperties(entry, self.Config.Style.EntryDisabled)
+			end
 		end
 	end
 
 	entry.Visible = true
+
+	if button then
+		entryData.RestingBackgroundColor3 = button.BackgroundColor3
+		self:_updateEntryInteraction(entryData, true)
+	end
 end
 
 function Dropdown:_renderAllEntries()
@@ -783,11 +820,25 @@ function Dropdown:_createEntry(option, index)
 		Button = button,
 		Option = option,
 		Index = index,
+		Hovered = false,
+		Pressed = false,
 	}
 
 	self._entries[option.Id] = entryData
 
 	if button then
+		self:_connectEntry(button.MouseEnter:Connect(function()
+			self:_setEntryInteraction(entryData, true, entryData.Pressed)
+		end))
+		self:_connectEntry(button.MouseLeave:Connect(function()
+			self:_setEntryInteraction(entryData, false, false)
+		end))
+		self:_connectEntry(button.MouseButton1Down:Connect(function()
+			self:_setEntryInteraction(entryData, true, true)
+		end))
+		self:_connectEntry(button.MouseButton1Up:Connect(function()
+			self:_setEntryInteraction(entryData, true, false)
+		end))
 		self:_connectEntry(button.Activated:Connect(function()
 			self:_activateOption(option, index)
 		end))
@@ -804,6 +855,10 @@ function Dropdown:_createEntry(option, index)
 
 	if self.Config.OnEntryCreated then
 		self.Config.OnEntryCreated(entry, option, self)
+		if button then
+			entryData.RestingBackgroundColor3 = button.BackgroundColor3
+			self:_updateEntryInteraction(entryData, true)
+		end
 	end
 end
 
@@ -811,6 +866,13 @@ function Dropdown:_destroyEntries()
 	self:_clearEntryConnections()
 
 	for _, entryData in pairs(self._entries) do
+		if entryData.InteractionTween then
+			local tween = entryData.InteractionTween
+			entryData.InteractionTween = nil
+			tween:Cancel()
+			tween:Destroy()
+		end
+
 		if self.Config.OnEntryDestroyed then
 			self.Config.OnEntryDestroyed(entryData.Instance, entryData.Option, self)
 		end
@@ -1204,73 +1266,7 @@ end
 ----------------------------------------------------------------
 
 function Dropdown:_setVisibleImmediate(visible)
-	self._transitionId += 1
-
-	if self._scale then
-		self._scale.Scale = visible and 1 or self.Config.Animation.ClosedScale
-	end
-
 	self._dropdown.Visible = visible
-end
-
-function Dropdown:_animateOpen()
-	self._transitionId += 1
-	local transitionId = self._transitionId
-
-	self._dropdown.Visible = true
-
-	if not self.Config.Animation.Enabled or not self._scale then
-		return
-	end
-
-	self._scale.Scale = self.Config.Animation.ClosedScale
-
-	local tween = TweenService:Create(
-		self._scale,
-		TweenInfo.new(
-			self.Config.Animation.Duration,
-			self.Config.Animation.EasingStyle,
-			self.Config.Animation.EasingDirection
-		),
-		{ Scale = 1 }
-	)
-
-	tween:Play()
-
-	task.delay(self.Config.Animation.Duration + 0.02, function()
-		if self._destroyed or self._transitionId ~= transitionId then
-			return
-		end
-		self._scale.Scale = 1
-	end)
-end
-
-function Dropdown:_animateClose()
-	self._transitionId += 1
-	local transitionId = self._transitionId
-
-	if not self.Config.Animation.Enabled or not self._scale then
-		self._dropdown.Visible = false
-		return
-	end
-
-	local tween = TweenService:Create(
-		self._scale,
-		TweenInfo.new(self.Config.Animation.Duration, self.Config.Animation.EasingStyle, Enum.EasingDirection.In),
-		{ Scale = self.Config.Animation.ClosedScale }
-	)
-
-	tween:Play()
-
-	task.delay(self.Config.Animation.Duration + 0.02, function()
-		if self._destroyed or self._transitionId ~= transitionId then
-			return
-		end
-
-		if not self._isOpen then
-			self._dropdown.Visible = false
-		end
-	end)
 end
 
 function Dropdown:Open()
@@ -1290,7 +1286,7 @@ function Dropdown:Open()
 
 	self._isOpen = true
 	self:_resizeGeneratedDropdown()
-	self._dropdown.Visible = true
+	self:_setVisibleImmediate(true)
 
 	-- AbsoluteSize updates after visibility in some UI arrangements.
 	task.defer(function()
@@ -1301,7 +1297,6 @@ function Dropdown:Open()
 	end)
 
 	self:_updatePosition()
-	self:_animateOpen()
 	self.Opened:Fire()
 
 	return self
@@ -1320,7 +1315,7 @@ function Dropdown:Close()
 		activeExclusiveDropdown = nil
 	end
 
-	self:_animateClose()
+	self:_setVisibleImmediate(false)
 	self.Closed:Fire()
 
 	return self
@@ -1403,12 +1398,6 @@ function Dropdown:Destroy()
 		-- Existing DropdownInstance belongs to the caller.
 		if self._dropdown then
 			self._dropdown.Visible = self._originalDropdownVisible == true
-		end
-
-		if self._generatedScale and self._scale then
-			self._scale:Destroy()
-		elseif self._scale and self._originalScale ~= nil then
-			self._scale.Scale = self._originalScale
 		end
 	end
 
