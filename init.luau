@@ -53,6 +53,7 @@
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
+local TextService = game:GetService("TextService")
 local Workspace = game:GetService("Workspace")
 
 local Dropdown = {}
@@ -130,8 +131,9 @@ local DEFAULTS = {
 	AutoFlip = true,
 	ClampToScreen = true,
 
-	Width = nil, -- nil = at least trigger width
+	Width = nil, -- nil = grow to fit the widest option
 	MinWidth = 160,
+	MaxWidth = 420,
 	MaxHeight = 280,
 	EntryHeight = 38,
 	EntryPadding = 4,
@@ -619,6 +621,13 @@ function Dropdown:_createGeneratedEntry(option, index)
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 6)
 	corner.Parent = button
+
+	-- TextScaled is enabled only when the dropdown reaches its width limit.
+	-- This constraint keeps shorter labels at the configured text size.
+	local textSizeConstraint = Instance.new("UITextSizeConstraint")
+	textSizeConstraint.Name = "DropdownTextSizeConstraint"
+	textSizeConstraint.MaxTextSize = button.TextSize
+	textSizeConstraint.Parent = button
 
 	return button
 end
@@ -1131,9 +1140,62 @@ function Dropdown:_resizeGeneratedDropdown()
 	end
 
 	local triggerWidth = self.Trigger.AbsoluteSize.X
-	local width = self.Config.Width or math.max(triggerWidth, self.Config.MinWidth)
+	local minimumWidth = math.max(triggerWidth, self.Config.MinWidth)
+	local scrollbarWidth = if contentHeight > height then self._entryContainer.ScrollBarThickness else 0
+	local entryHorizontalPadding = 24
+	local desiredWidth = minimumWidth
+	local measuredWidths = {}
+
+	for _, entryData in pairs(self._entries) do
+		local label = self:_getEntryLabel(entryData.Instance, entryData.Option)
+		if label and (label:IsA("TextLabel") or label:IsA("TextButton")) then
+			local measuredText = TextService:GetTextSize(
+				tostring(label.ContentText),
+				label.TextSize,
+				label.Font,
+				Vector2.new(100000, self.Config.EntryHeight)
+			)
+			measuredWidths[label] = measuredText.X
+
+			if not self.Config.Width then
+				desiredWidth = math.max(
+					desiredWidth,
+					math.ceil(measuredText.X) + entryHorizontalPadding + contentPadding + scrollbarWidth
+				)
+			end
+		end
+	end
+
+	if self.Config.Width then
+		desiredWidth = math.max(self.Config.Width, minimumWidth)
+	end
+
+	local maximumWidth = self.Config.MaxWidth
+	local _, referenceSize = self:_getPositionReference()
+	if referenceSize.X > 0 then
+		local screenMaximum = math.max(0, referenceSize.X - self.Config.ScreenPadding * 2)
+		maximumWidth = if maximumWidth then math.min(maximumWidth, screenMaximum) else screenMaximum
+	end
+
+	local width = desiredWidth
+	if maximumWidth then
+		width = math.min(width, maximumWidth)
+	end
 
 	self._dropdown.Size = UDim2.fromOffset(width, height)
+
+	local availableTextWidth = math.max(0, width - entryHorizontalPadding - contentPadding - scrollbarWidth)
+	for _, entryData in pairs(self._entries) do
+		local label = self:_getEntryLabel(entryData.Instance, entryData.Option)
+		if label and (label:IsA("TextLabel") or label:IsA("TextButton")) then
+			label.TextScaled = measuredWidths[label] > availableTextWidth
+
+			local constraint = label:FindFirstChild("DropdownTextSizeConstraint")
+			if constraint and constraint:IsA("UITextSizeConstraint") then
+				constraint.MaxTextSize = label.TextSize
+			end
+		end
+	end
 
 	if self._entryContainer:IsA("ScrollingFrame") then
 		self._entryContainer.CanvasSize = UDim2.fromOffset(0, contentHeight)
